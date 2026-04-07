@@ -446,6 +446,22 @@ def _patched_sctp_init(self, transport, port=5000):
 _RTCSctpTransport.__init__ = _patched_sctp_init
 
 # ---------------------------------------------------------------------------
+# Patch 5b: Force SCTP server role (prevents init collision with NX VMS)
+#
+# NX VMS always sends SCTP InitChunk (it wants to be the initiator).
+# aiortc decides who initiates based on DTLS role: DTLS-client →
+# is_server=False → sends its own InitChunk → collision.
+# aiortc only handles incoming InitChunk when is_server=True, so both
+# Inits get silently dropped → SCTP never establishes.
+#
+# Fix: override is_server to always return True. DTLS stays as client
+# (sends ClientHello), ICE stays controlling — only SCTP initiation
+# changes. Our side waits for VMS's InitChunk and responds with
+# InitAckChunk.
+# ---------------------------------------------------------------------------
+_RTCSctpTransport.is_server = property(lambda self: True)
+
+# ---------------------------------------------------------------------------
 # Patch 6: SCTP tracing (minimal)
 # ---------------------------------------------------------------------------
 from aiortc.rtcsctptransport import (
