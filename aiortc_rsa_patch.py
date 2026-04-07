@@ -439,7 +439,7 @@ _original_sctp_init = _RTCSctpTransport.__init__
 
 def _patched_sctp_init(self, transport, port=5000):
     _original_sctp_init(self, transport, port)
-    self._outbound_streams_count = 1
+    self._outbound_streams_count = 1024
     self._inbound_streams_max = 1024
 
 
