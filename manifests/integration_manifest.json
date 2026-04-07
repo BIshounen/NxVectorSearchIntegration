@@ -1,0 +1,15 @@
+{
+    "id": "nx.apiintegration.vectorization",
+    "name": "NxT Gen Vectorizator",
+    "description": "Application for vectorization of objects. Enable on the device on which you want to do vectorization",
+    "vendor": "Network Optix",
+    "version": "0.0.1",
+    "noAutoBestShots": false,
+    "isLicenseRequired": false,
+    "engineSettingsModel":
+    {
+        "type": "Settings",
+        "items": [
+        ]
+    }
+}
