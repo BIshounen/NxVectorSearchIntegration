@@ -17,9 +17,7 @@ if __name__ == "__main__":
     engine_manifest = json.load(f_e)
     agent_manifest = json.load(f_a)
 
-  server_url = f'https://10.2.48.85:7001/'
-  # server_url = f'https://{config.site_id}.relay.vmsproxy.com/'
-  # server_url = 'https://207.182.72.162:7001/'
+  server_url = config.server_url
 
   resp = requests.head(f'{server_url}/ui', allow_redirects=False, verify=False)
 
