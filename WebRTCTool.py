@@ -481,6 +481,8 @@ class WebRTCClient:
                     # ── LOCAL MODE: send vanilla SDP, no filtering ──
                     logger.info("Local mode — sending SDP answer as-is (no filtering/STUN/trickle)")
                     final_sdp = self._force_sha256_in_sdp(local_sdp)
+                    # Fix SCTP collision: let VMS be the SCTP initiator
+                    final_sdp = self._force_setup_passive_in_sdp(final_sdp)
                     logger.info("Local SDP:\n%s", final_sdp)
 
                     await self._ws.send_json({
@@ -550,6 +552,8 @@ class WebRTCClient:
                 logger.info("Local SDP (filtered):\n%s", local_sdp)
 
                 final_sdp = self._force_sha256_in_sdp(local_sdp)
+                # Fix SCTP collision: let VMS be the SCTP initiator
+                final_sdp = self._force_setup_passive_in_sdp(final_sdp)
 
                 await self._ws.send_json({
                   "sdp": {
@@ -703,6 +707,29 @@ class WebRTCClient:
                 if len(parts) == 2:
                     line = f"a=fingerprint:sha-256 {parts[1]}"
                     logger.debug("Rewrote SDP fingerprint line → sha-256")
+            lines.append(line)
+        return "\r\n".join(lines)
+
+    @staticmethod
+    def _force_setup_passive_in_sdp(sdp: str) -> str:
+        """
+        Rewrite 'a=setup:active' → 'a=setup:passive' in the SDP answer.
+
+        Why: NX VMS (ice-lite) always initiates the SCTP association by
+        sending InitChunk.  aiortc decides who is the SCTP initiator based
+        on the DTLS role: DTLS-client → SCTP-client → also sends InitChunk.
+        This creates an SCTP init collision that aiortc cannot resolve
+        (it only handles incoming InitChunk when is_server=True).
+
+        By making ourselves the DTLS *server* (setup:passive), aiortc sets
+        is_server=True for SCTP, so it waits for the VMS's InitChunk and
+        responds with InitAckChunk — no collision.
+        """
+        lines = []
+        for line in sdp.splitlines():
+            if line.strip() == "a=setup:active":
+                line = "a=setup:passive"
+                logger.info("SDP: rewrote a=setup:active → a=setup:passive (SCTP collision fix)")
             lines.append(line)
         return "\r\n".join(lines)
 
