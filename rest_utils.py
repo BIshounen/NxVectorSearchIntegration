@@ -10,7 +10,7 @@ DEVICE_AGENTS_PATH = "/rest/v4/analytics/engines/{engine_id}/deviceAgents"
 DEVICE_STREAM_PATH = "/rest/v4/devices/{device_id}/media.{video_format}"
 NONCE_PATH = "/api/getNonce"
 RTSP_PATH = "/{device_id}"
-WEBRTC_PATH = "/rest/v3/devices/{device_id}/webrtc"
+WEBRTC_PATH = "/rest/v3/devices/{device_id}/webrtc?enableMetadata=true"
 SITE_INFO_PATH = "/rest/v4/site/info"
 
 

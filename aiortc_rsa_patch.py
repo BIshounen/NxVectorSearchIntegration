@@ -446,20 +446,122 @@ def _patched_sctp_init(self, transport, port=5000):
 _RTCSctpTransport.__init__ = _patched_sctp_init
 
 # ---------------------------------------------------------------------------
-# Patch 5b: Force SCTP server role (prevents init collision with NX VMS)
+# Patch 5b: SCTP init collision handling (RFC 4960 §5.2.1)
 #
-# NX VMS always sends SCTP InitChunk (it wants to be the initiator).
-# aiortc decides who initiates based on DTLS role: DTLS-client →
-# is_server=False → sends its own InitChunk → collision.
-# aiortc only handles incoming InitChunk when is_server=True, so both
-# Inits get silently dropped → SCTP never establishes.
+# NX VMS always sends SCTP InitChunk. aiortc (as DTLS client) also sends
+# InitChunk. This creates a simultaneous-open collision. aiortc only
+# handles incoming InitChunk when is_server=True, so both Inits get
+# silently dropped → SCTP never establishes.
 #
-# Fix: override is_server to always return True. DTLS stays as client
-# (sends ClientHello), ICE stays controlling — only SCTP initiation
-# changes. Our side waits for VMS's InitChunk and responds with
-# InitAckChunk.
+# Fix: patch _receive_chunk to handle InitChunk while in COOKIE_WAIT
+# state (we already sent our Init). Per RFC 4960 §5.2.1, we respond
+# with InitAck, allowing both sides to proceed.  We also handle
+# CookieEcho in any state (not just when is_server=True) so the
+# handshake can complete from either direction.
+#
+# This is faster than the is_server=True approach because our side
+# proactively sends InitChunk immediately — if VMS responds first,
+# we get a fast 2-RTT handshake without waiting.
 # ---------------------------------------------------------------------------
-_RTCSctpTransport.is_server = property(lambda self: True)
+import hmac as _hmac_mod
+from struct import pack as _pack, unpack_from as _unpack_from
+from aiortc.rtcsctptransport import (
+    SCTP_STATE_COOKIE, COOKIE_LENGTH, COOKIE_LIFETIME,
+    tsn_minus_one as _tsn_minus_one,
+)
+
+_orig_receive_chunk_for_collision = _RTCSctpTransport._receive_chunk
+
+
+async def _collision_aware_receive_chunk(self, chunk):
+    """
+    Patched _receive_chunk that handles SCTP init collisions.
+
+    When we're in COOKIE_WAIT (sent our InitChunk) and receive an
+    InitChunk from the peer, respond with InitAckChunk per RFC 4960 §5.2.1.
+
+    Also handles CookieEchoChunk regardless of is_server flag.
+    """
+    # Case 1: We're in COOKIE_WAIT and receive an InitChunk (collision)
+    if (
+        isinstance(chunk, InitChunk)
+        and not self.is_server
+        and self._association_state in (
+            self.State.COOKIE_WAIT,
+            self.State.CLOSED,
+            self.State.COOKIE_ECHOED,
+        )
+    ):
+        print(f"[SCTP] Init collision: got InitChunk while in {self._association_state.name}, responding with InitAck", flush=True)
+
+        # Cancel T1 timer if running (we were retransmitting our Init)
+        self._t1_cancel()
+
+        # Process the peer's Init (same as server path)
+        self._last_received_tsn = _tsn_minus_one(chunk.initial_tsn)
+        self._reconfig_response_seq = _tsn_minus_one(chunk.initial_tsn)
+        self._remote_verification_tag = chunk.initiate_tag
+        self._ssthresh = chunk.advertised_rwnd
+        self._get_extensions(chunk.params)
+
+        self._inbound_streams_count = min(
+            chunk.outbound_streams, self._inbound_streams_max
+        )
+        self._outbound_streams_count = min(
+            self._outbound_streams_count, chunk.inbound_streams
+        )
+
+        # Build InitAck
+        init_ack = InitAckChunk()
+        init_ack.initiate_tag = self._local_verification_tag
+        init_ack.advertised_rwnd = self._advertised_rwnd
+        init_ack.outbound_streams = self._outbound_streams_count
+        init_ack.inbound_streams = self._inbound_streams_max
+        init_ack.initial_tsn = self._local_tsn
+        self._set_extensions(init_ack.params)
+
+        # Generate state cookie
+        cookie = _pack("!L", self._get_timestamp())
+        cookie += _hmac_mod.new(self._hmac_key, cookie, "sha1").digest()
+        init_ack.params.append((SCTP_STATE_COOKIE, cookie))
+        await self._send_chunk(init_ack)
+        return
+
+    # Case 2: Receive CookieEchoChunk — handle regardless of is_server
+    # (the peer got our InitAck and is completing the handshake)
+    if isinstance(chunk, CookieEchoChunk) and not self.is_server:
+        cookie = chunk.body
+        if (
+            len(cookie) != COOKIE_LENGTH
+            or _hmac_mod.new(self._hmac_key, cookie[0:4], "sha1").digest() != cookie[4:]
+        ):
+            print("[SCTP] CookieEcho: invalid cookie MAC", flush=True)
+            return
+
+        now = self._get_timestamp()
+        stamp = _unpack_from("!L", cookie)[0]
+        if stamp < now - COOKIE_LIFETIME or stamp > now:
+            print("[SCTP] CookieEcho: cookie expired", flush=True)
+            from aiortc.rtcsctptransport import ErrorChunk, SCTP_CAUSE_STALE_COOKIE
+            error = ErrorChunk()
+            error.params.append((SCTP_CAUSE_STALE_COOKIE, b"\x00" * 8))
+            await self._send_chunk(error)
+            return
+
+        # Cancel T1 if we were in COOKIE_WAIT or COOKIE_ECHOED
+        self._t1_cancel()
+
+        cookie_ack = CookieAckChunk()
+        await self._send_chunk(cookie_ack)
+        self._set_state(self.State.ESTABLISHED)
+        print("[SCTP] CookieEcho accepted → ESTABLISHED (collision resolved)", flush=True)
+        return
+
+    # All other cases: delegate to original handler
+    return await _orig_receive_chunk_for_collision(self, chunk)
+
+
+_RTCSctpTransport._receive_chunk = _collision_aware_receive_chunk
 
 # ---------------------------------------------------------------------------
 # Patch 6: SCTP tracing (minimal)
