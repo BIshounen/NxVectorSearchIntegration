@@ -1,1 +1,1 @@
-# NxVectorSearchIntegration
+# Nx Vector Search Integration
