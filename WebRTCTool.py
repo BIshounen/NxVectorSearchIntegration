@@ -284,6 +284,14 @@ class WebRTCClient:
         self.on_metadata: MetadataCallback | None = None
         self.on_frame: FrameCallback | None = None
 
+        # Detect local connections — skip STUN/srflx/trickle when local
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        self._is_local = host in ("127.0.0.1", "localhost", "::1") or host.startswith("172.") or host.startswith("10.") or host.startswith("192.168.")
+        if self._is_local:
+            logger.info("Local connection detected (%s) — skipping STUN/srflx/trickle", host)
+
         # Internal state
         self._pc: RTCPeerConnection | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -372,12 +380,18 @@ class WebRTCClient:
         """Open the WebSocket and PeerConnection, then subscribe."""
         logger.info("=== _open() START ===")
 
-        self._pc = RTCPeerConnection(configuration=RTCConfiguration(
-            iceServers=[
-                RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-                RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-            ]
-        ))
+        if self._is_local:
+            # Local: no STUN servers needed, faster ICE gathering
+            self._pc = RTCPeerConnection(configuration=RTCConfiguration(
+                iceServers=[]
+            ))
+        else:
+            self._pc = RTCPeerConnection(configuration=RTCConfiguration(
+                iceServers=[
+                    RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+                    RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
+                ]
+            ))
         logger.info("PC created, connectionState=%s, iceConnectionState=%s",
                     self._pc.connectionState, self._pc.iceConnectionState)
 
@@ -462,6 +476,23 @@ class WebRTCClient:
 
                 # Get the full local description WITH candidates
                 local_sdp = self._pc.localDescription.sdp
+
+                if self._is_local:
+                    # ── LOCAL MODE: send vanilla SDP, no filtering ──
+                    logger.info("Local mode — sending SDP answer as-is (no filtering/STUN/trickle)")
+                    final_sdp = self._force_sha256_in_sdp(local_sdp)
+                    logger.info("Local SDP:\n%s", final_sdp)
+
+                    await self._ws.send_json({
+                      "sdp": {
+                        "type": "answer",
+                        "sdp": final_sdp,
+                      }
+                    })
+                    logger.info("Sent SDP answer (local mode)")
+                    return
+
+                # ── CLOUD/RELAY MODE: apply filtering + STUN + trickle ──
 
                 # Filter out the 192.168.x.x candidate - it won't work anyway
                 filtered_lines = []
