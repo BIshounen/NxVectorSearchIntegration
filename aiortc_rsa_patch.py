@@ -489,8 +489,14 @@ async def _traced_send_chunk(self, chunk):
     _sctp_send_count[0] += 1
     n = _sctp_send_count[0]
     name = _chunk_name(chunk)
+    extra = ""
+    if isinstance(chunk, (InitChunk, InitAckChunk)):
+        extra = (f" [initiate_tag={chunk.initiate_tag}, "
+                 f"OS={chunk.outbound_streams}, MIS={chunk.inbound_streams}, "
+                 f"initial_tsn={chunk.initial_tsn}]")
+        extra += f" remote_port={self._remote_port}, remote_vtag={self._remote_verification_tag}"
     if n <= 20 or name not in ("SackChunk", "DataChunk"):
-        print(f"[SCTP-TX #{n}] {name}", flush=True)
+        print(f"[SCTP-TX #{n}] {name}{extra}", flush=True)
     return await _orig_send_chunk(self, chunk)
 
 
@@ -499,10 +505,18 @@ async def _traced_receive_chunk(self, chunk):
     n = _sctp_recv_count[0]
     name = _chunk_name(chunk)
     extra = ""
-    if isinstance(chunk, CookieAckChunk):
+    if isinstance(chunk, (InitChunk, InitAckChunk)):
+        extra = (f" [initiate_tag={chunk.initiate_tag}, "
+                 f"OS={chunk.outbound_streams}, MIS={chunk.inbound_streams}, "
+                 f"initial_tsn={chunk.initial_tsn}]")
+    elif isinstance(chunk, CookieEchoChunk):
+        extra = f" [cookie_len={len(chunk.body) if chunk.body else 0}]"
+    elif isinstance(chunk, CookieAckChunk):
         extra = " *** HANDSHAKE COMPLETE ***"
     elif isinstance(chunk, AbortChunk):
         extra = " *** ABORTED ***"
+    elif isinstance(chunk, ErrorChunk):
+        extra = f" *** ERROR params={chunk.params} ***"
     if n <= 50 or name not in ("SackChunk", "DataChunk"):
         print(f"[SCTP-RX #{n}] {name}{extra}", flush=True)
     return await _orig_receive_chunk(self, chunk)
