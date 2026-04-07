@@ -470,6 +470,16 @@ class WebRTCClient:
                 answer = await self._pc.createAnswer()
                 await self._pc.setLocalDescription(answer)
 
+                # ── Fix SCTP collision with NX VMS ──
+                # VMS always initiates SCTP (sends InitChunk). aiortc only
+                # handles incoming InitChunk when is_server=True. is_server
+                # is True when DTLS role != "controlling", i.e. DTLS server.
+                # createAnswer sets a=setup:active → DTLS client → SCTP client
+                # → both sides send InitChunk → collision → dead.
+                # Fix: flip the DTLS role to "server" on all transports so
+                # aiortc becomes the SCTP responder.
+                self._force_sctp_server_role()
+
                 while self._pc.iceGatheringState != "complete":
                     await asyncio.sleep(0.05)
                 logger.info("ICE gathering complete — state=%s", self._pc.iceGatheringState)
@@ -693,6 +703,38 @@ class WebRTCClient:
                     logger.warning("Video decode error (no frames yet): %s", e)
 
     # ── SDP / ICE helpers ─────────────────────────────────────────────
+
+    def _force_sctp_server_role(self) -> None:
+        """
+        Force aiortc's DTLS transports to role='server', which makes
+        the SCTP transport's is_server=True. This prevents the SCTP
+        init collision with NX VMS.
+
+        Must be called AFTER setLocalDescription (which sets role='client'
+        for a=setup:active answers) but BEFORE DTLS/SCTP actually starts.
+        """
+        flipped = 0
+        # Flip DTLS role on all transceivers (video/audio)
+        for t in self._pc.getTransceivers():
+            dtls = getattr(t, '_dtlsTransport', None) or getattr(t.receiver, 'transport', None)
+            if dtls and hasattr(dtls, '_set_role'):
+                old = getattr(dtls, '_role', '?')
+                dtls._set_role("server")
+                flipped += 1
+                logger.info("Flipped DTLS role %s → server on transceiver %s", old, t.mid)
+
+        # Flip DTLS role on SCTP transport
+        sctp = getattr(self._pc, '_RTCPeerConnection__sctp', None)
+        if sctp and hasattr(sctp, 'transport') and hasattr(sctp.transport, '_set_role'):
+            old = getattr(sctp.transport, '_role', '?')
+            sctp.transport._set_role("server")
+            flipped += 1
+            logger.info("Flipped DTLS role %s → server on SCTP transport", old)
+
+        if flipped:
+            logger.info("Forced SCTP server role on %d transport(s)", flipped)
+        else:
+            logger.warning("Could not find DTLS transports to flip role on")
 
     @staticmethod
     def _force_sha256_in_sdp(sdp: str) -> str:
