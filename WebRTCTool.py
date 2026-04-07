@@ -313,10 +313,45 @@ class WebRTCClient:
             and self._pc.connectionState in ("connected", "connecting")
         )
 
-    async def run(self) -> None:
-        """Connect and consume until closed or the server hangs up."""
+    async def run(self, max_retries: int = 5, retry_delay: float = 2.0) -> None:
+        """Connect and consume, retrying on early disconnects.
+
+        The VMS may tear down the session if its DataChannel queue
+        overflows before the SCTP handshake completes.  Retrying
+        usually succeeds because the VMS drains stale metadata
+        between attempts.
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                await self._run_once()
+                return  # clean exit — don't retry
+            except asyncio.CancelledError:
+                raise  # never retry on cancellation
+            except Exception as exc:
+                if attempt < max_retries:
+                    logger.warning(
+                        "WebRTC attempt %d/%d failed (%s), retrying in %.1fs…",
+                        attempt, max_retries, exc, retry_delay,
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(
+                        "WebRTC attempt %d/%d failed (%s), giving up.",
+                        attempt, max_retries, exc,
+                    )
+                    raise
+
+    async def _run_once(self) -> None:
+        """Single connection attempt — connect and consume until closed."""
         logger.info("=== run() START ===")
         logger.info("_closed event is_set=%s", self._closed.is_set())
+
+        # Reset state for a fresh attempt
+        self._pc = None
+        self._ws = None
+        self._session = None
+        self._latest_frame = None
+        self._closed = asyncio.Event()
 
         try:
             await self._open()
